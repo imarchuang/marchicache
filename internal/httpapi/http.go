@@ -32,8 +32,8 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":    true,
 		"keys":  s.st.Len(),
-		"aof":   0,
-		"fsync": "none",
+		"aof":   s.st.AOFBytes(),
+		"fsync": s.st.FsyncPolicy(),
 	})
 }
 

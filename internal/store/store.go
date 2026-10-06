@@ -1,6 +1,7 @@
 package store
 
 import (
+	"os"
 	"sync"
 	"time"
 )
@@ -24,11 +25,18 @@ type entry struct {
 	expireAt time.Time // zero = no expire
 }
 
-// Store is an in-memory string dict with per-key TTL.
+// Store is an in-memory string dict with per-key TTL and optional AOF.
 type Store struct {
-	mu    sync.RWMutex
-	dict  map[string]*entry
-	clock Clock
+	mu        sync.RWMutex
+	dict      map[string]*entry
+	clock     Clock
+	dataDir   string
+	policy    FsyncPolicy
+	aof       *os.File
+	aofDirty  bool
+	aofErr    error
+	fsyncStop chan struct{}
+	fsyncWG   sync.WaitGroup
 }
 
 func New() *Store {
@@ -51,6 +59,7 @@ func (s *Store) SetEX(key, value string, ttl time.Duration) {
 		e.expireAt = s.clock.Now().Add(ttl)
 	}
 	s.dict[key] = e
+	s.appendLocked(aofRec{Op: "SET", Key: key, Value: value, ExpireAt: expireUnix(e.expireAt)})
 }
 
 func (s *Store) Get(key string) (string, bool) {
@@ -62,6 +71,7 @@ func (s *Store) Get(key string) (string, bool) {
 	}
 	if s.isExpiredLocked(e) {
 		delete(s.dict, key)
+		s.appendLocked(aofRec{Op: "DEL", Key: key})
 		return "", false
 	}
 	return e.value, true
@@ -76,9 +86,11 @@ func (s *Store) Del(key string) bool {
 	}
 	if s.isExpiredLocked(e) {
 		delete(s.dict, key)
+		s.appendLocked(aofRec{Op: "DEL", Key: key})
 		return false
 	}
 	delete(s.dict, key)
+	s.appendLocked(aofRec{Op: "DEL", Key: key})
 	return true
 }
 
@@ -92,13 +104,16 @@ func (s *Store) Expire(key string, ttl time.Duration) bool {
 	}
 	if s.isExpiredLocked(e) {
 		delete(s.dict, key)
+		s.appendLocked(aofRec{Op: "DEL", Key: key})
 		return false
 	}
 	if ttl <= 0 {
 		delete(s.dict, key)
+		s.appendLocked(aofRec{Op: "DEL", Key: key})
 		return true
 	}
 	e.expireAt = s.clock.Now().Add(ttl)
+	s.appendLocked(aofRec{Op: "EXPIRE", Key: key, ExpireAt: expireUnix(e.expireAt)})
 	return true
 }
 
@@ -112,6 +127,7 @@ func (s *Store) TTL(key string) int64 {
 	}
 	if s.isExpiredLocked(e) {
 		delete(s.dict, key)
+		s.appendLocked(aofRec{Op: "DEL", Key: key})
 		return TTLMissing
 	}
 	if e.expireAt.IsZero() {
@@ -120,6 +136,7 @@ func (s *Store) TTL(key string) int64 {
 	sec := int64(e.expireAt.Sub(s.clock.Now()).Seconds())
 	if sec < 0 {
 		delete(s.dict, key)
+		s.appendLocked(aofRec{Op: "DEL", Key: key})
 		return TTLMissing
 	}
 	return sec
@@ -143,6 +160,7 @@ func (s *Store) lazySweepLocked() {
 	for k, e := range s.dict {
 		if s.isExpiredLocked(e) {
 			delete(s.dict, k)
+			s.appendLocked(aofRec{Op: "DEL", Key: k})
 		}
 	}
 }
@@ -164,6 +182,7 @@ func (s *Store) ActiveExpire(limit int) int {
 		i++
 		if s.isExpiredLocked(e) {
 			delete(s.dict, k)
+			s.appendLocked(aofRec{Op: "DEL", Key: k})
 			n++
 		}
 	}
