@@ -3,7 +3,6 @@ package store
 import (
 	"errors"
 	"os"
-	"sync"
 	"time"
 )
 
@@ -45,9 +44,9 @@ type entry struct {
 	lastAccess time.Time
 }
 
-// Store is an in-memory string dict with per-key TTL and optional AOF.
+// Store is an in-memory dict. Only the event-loop goroutine may call methods
+// once BindLoop is set (no mutex).
 type Store struct {
-	mu        sync.RWMutex
 	dict      map[string]*entry
 	clock     Clock
 	dataDir   string
@@ -55,9 +54,8 @@ type Store struct {
 	aof       *os.File
 	aofDirty  bool
 	aofErr    error
-	fsyncStop chan struct{}
-	fsyncWG   sync.WaitGroup
 	maxMemory int64
+	loopID    int64
 }
 
 func New() *Store {
@@ -73,8 +71,7 @@ func (s *Store) Set(key, value string) {
 }
 
 func (s *Store) SetEX(key, value string, ttl time.Duration) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.check()
 	e := &entry{typ: typeString, value: value, lastAccess: s.clock.Now()}
 	if ttl > 0 {
 		e.expireAt = s.clock.Now().Add(ttl)
@@ -85,8 +82,7 @@ func (s *Store) SetEX(key, value string, ttl time.Duration) {
 }
 
 func (s *Store) Get(key string) (string, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.check()
 	e, ok := s.lookupLocked(key)
 	if !ok {
 		return "", false, nil
@@ -112,8 +108,7 @@ func (s *Store) lookupLocked(key string) (*entry, bool) {
 }
 
 func (s *Store) Del(key string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.check()
 	e, ok := s.dict[key]
 	if !ok {
 		return false
@@ -130,8 +125,7 @@ func (s *Store) Del(key string) bool {
 
 // Expire sets a TTL. Returns false if the key is missing (Redis EXPIRE).
 func (s *Store) Expire(key string, ttl time.Duration) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.check()
 	e, ok := s.dict[key]
 	if !ok {
 		return false
@@ -153,8 +147,7 @@ func (s *Store) Expire(key string, ttl time.Duration) bool {
 
 // TTL returns remaining seconds, -1 if no expire, -2 if missing (Redis TTL).
 func (s *Store) TTL(key string) int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.check()
 	e, ok := s.dict[key]
 	if !ok {
 		return TTLMissing
@@ -177,8 +170,7 @@ func (s *Store) TTL(key string) int64 {
 }
 
 func (s *Store) Len() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.check()
 	s.lazySweepLocked()
 	return len(s.dict)
 }
@@ -202,8 +194,7 @@ func (s *Store) lazySweepLocked() {
 // ActiveExpire samples up to limit keys (Go map iteration is randomized)
 // and deletes expired ones. Redis-style active expire on a time event.
 func (s *Store) ActiveExpire(limit int) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.check()
 	if limit <= 0 {
 		limit = 20
 	}
@@ -223,20 +214,10 @@ func (s *Store) ActiveExpire(limit int) int {
 	return n
 }
 
-func (s *Store) StartActiveExpire(stop <-chan struct{}, interval time.Duration) {
-	if interval <= 0 {
-		interval = 100 * time.Millisecond
+func (s *Store) Tick() {
+	s.check()
+	s.ActiveExpire(20)
+	if s.policy == FsyncEverysec {
+		s.fsyncIfDirtyLocked()
 	}
-	go func() {
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-t.C:
-				s.ActiveExpire(20)
-			}
-		}
-	}()
 }

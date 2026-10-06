@@ -33,8 +33,7 @@ func (s *Store) dumpRecordsLocked() []aofRec {
 
 // Rewrite dumps the live dict to rewrite.tmp and atomically replaces appendonly.aof.
 func (s *Store) Rewrite() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.check()
 	if s.dataDir == "" {
 		return fmt.Errorf("rewrite requires dataDir")
 	}

@@ -3,8 +3,7 @@ package store
 import "time"
 
 func (s *Store) SetMaxMemory(n int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.check()
 	s.maxMemory = n
 	s.evictLRULocked()
 }
@@ -30,8 +29,7 @@ func (s *Store) usedMemoryLocked() int64 {
 }
 
 func (s *Store) UsedMemory() int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.check()
 	return s.usedMemoryLocked()
 }
 

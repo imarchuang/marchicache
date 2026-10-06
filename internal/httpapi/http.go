@@ -11,12 +11,40 @@ import (
 	"github.com/marchi/marchicache/internal/store"
 )
 
-type Server struct {
-	st *store.Store
+type Executor interface {
+	Do(fn func())
 }
 
-func New(st *store.Store) http.Handler {
-	s := &Server{st: st}
+type serial struct {
+	ch chan func()
+}
+
+func Serial() Executor {
+	s := &serial{ch: make(chan func(), 64)}
+	go func() {
+		for fn := range s.ch {
+			fn()
+		}
+	}()
+	return s
+}
+
+func (s *serial) Do(fn func()) {
+	done := make(chan struct{})
+	s.ch <- func() {
+		defer close(done)
+		fn()
+	}
+	<-done
+}
+
+type Server struct {
+	st   *store.Store
+	exec Executor
+}
+
+func New(st *store.Store, exec Executor) http.Handler {
+	s := &Server{st: st, exec: exec}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("PUT /kv/{key}", s.putKV)
@@ -34,12 +62,20 @@ func New(st *store.Store) http.Handler {
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
+	var keys int
+	var aof int64
+	var fsync string
+	s.exec.Do(func() {
+		keys = s.st.Len()
+		aof = s.st.AOFBytes()
+		fsync = s.st.FsyncPolicy()
+	})
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":    true,
-		"keys":  s.st.Len(),
-		"aof":   s.st.AOFBytes(),
-		"fsync": s.st.FsyncPolicy(),
+		"keys":  keys,
+		"aof":   aof,
+		"fsync": fsync,
 	})
 }
 
@@ -56,16 +92,19 @@ func (s *Server) putKV(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid ex", http.StatusBadRequest)
 			return
 		}
-		s.st.SetEX(key, string(body), time.Duration(sec)*time.Second)
+		s.exec.Do(func() { s.st.SetEX(key, string(body), time.Duration(sec)*time.Second) })
 	} else {
-		s.st.Set(key, string(body))
+		s.exec.Do(func() { s.st.Set(key, string(body)) })
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) getKV(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	v, ok, err := s.st.Get(key)
+	var v string
+	var ok bool
+	var err error
+	s.exec.Do(func() { v, ok, err = s.st.Get(key) })
 	if err == store.ErrWrongType {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -80,7 +119,9 @@ func (s *Server) getKV(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) delKV(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	if !s.st.Del(key) {
+	var ok bool
+	s.exec.Do(func() { ok = s.st.Del(key) })
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
@@ -95,7 +136,9 @@ func (s *Server) expire(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid ex", http.StatusBadRequest)
 		return
 	}
-	if !s.st.Expire(key, time.Duration(sec)*time.Second) {
+	var ok bool
+	s.exec.Do(func() { ok = s.st.Expire(key, time.Duration(sec)*time.Second) })
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
@@ -104,8 +147,10 @@ func (s *Server) expire(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) ttl(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
+	var n int64
+	s.exec.Do(func() { n = s.st.TTL(key) })
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprintf(w, "%d", s.st.TTL(key))
+	fmt.Fprintf(w, "%d", n)
 }
 
 func (s *Server) putHash(w http.ResponseWriter, r *http.Request) {
@@ -116,19 +161,24 @@ func (s *Server) putHash(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if _, err := s.st.HSet(key, field, string(body)); err != nil {
-		if err == store.ErrWrongType {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+	var herr error
+	s.exec.Do(func() { _, herr = s.st.HSet(key, field, string(body)) })
+	if herr != nil {
+		if herr == store.ErrWrongType {
+			http.Error(w, herr.Error(), http.StatusBadRequest)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, herr.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) getHashField(w http.ResponseWriter, r *http.Request) {
-	v, ok, err := s.st.HGet(r.PathValue("key"), r.PathValue("field"))
+	var v string
+	var ok bool
+	var err error
+	s.exec.Do(func() { v, ok, err = s.st.HGet(r.PathValue("key"), r.PathValue("field")) })
 	if err == store.ErrWrongType {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -142,7 +192,9 @@ func (s *Server) getHashField(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getHash(w http.ResponseWriter, r *http.Request) {
-	all, err := s.st.HGetAll(r.PathValue("key"))
+	var all map[string]string
+	var err error
+	s.exec.Do(func() { all, err = s.st.HGetAll(r.PathValue("key")) })
 	if err == store.ErrWrongType {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -161,19 +213,23 @@ func (s *Server) putZSet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid score", http.StatusBadRequest)
 		return
 	}
-	if _, err := s.st.ZAdd(r.PathValue("key"), r.PathValue("member"), score); err != nil {
-		if err == store.ErrWrongType {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+	var zerr error
+	s.exec.Do(func() { _, zerr = s.st.ZAdd(r.PathValue("key"), r.PathValue("member"), score) })
+	if zerr != nil {
+		if zerr == store.ErrWrongType {
+			http.Error(w, zerr.Error(), http.StatusBadRequest)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, zerr.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) getZSet(w http.ResponseWriter, r *http.Request) {
-	got, err := s.st.ZRange(r.PathValue("key"), 0, -1)
+	var got []store.ZMember
+	var err error
+	s.exec.Do(func() { got, err = s.st.ZRange(r.PathValue("key"), 0, -1) })
 	if err == store.ErrWrongType {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -195,7 +251,9 @@ func (s *Server) getZSet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) rewrite(w http.ResponseWriter, _ *http.Request) {
-	if err := s.st.Rewrite(); err != nil {
+	var err error
+	s.exec.Do(func() { err = s.st.Rewrite() })
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
