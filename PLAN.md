@@ -24,12 +24,15 @@ This fills the Key Technologies gap: every other store you built is
 4. **RDB / rewrite** is a point-in-time dump so AOF does not grow forever.
 5. Values have **types** (string, hash, list, zset subset); commands are
    type-checked, not schemaless JSON blobs.
-6. Single-threaded *command execution* (one goroutine mutating the dict)
-   is a product choice: no per-key locks, pipelining still works.
+6. **Event loop (ae):** one thread multiplexes thousands of sockets
+   (`epoll`/`kqueue`), then **read → parse → execute → write** on that
+   same thread. High traffic ≠ one OS thread per connection. The dict
+   has **no lock** because only the loop mutates it.
 
 **Pass bar:** SET with EX, kill process before TTL fires, restart from AOF,
 key is still there with remaining TTL ≈ original; expire then GET miss.
-Optional: speak enough **RESP** that `redis-cli` can GET/SET.
+RESP path: N connections pipelining SET/GET; race detector shows dict
+touched from one goroutine; `redis-cli` works.
 
 ---
 
@@ -43,9 +46,9 @@ Optional: speak enough **RESP** that `redis-cli` can GET/SET.
 | LIST or ZSET | pick **one** extra type (ZSET if you care about rankings) | streams, bitmaps, geo |
 | AOF | `appendonly.aof`, fsync everysec default | AOF timestamp, mixed RDB preamble |
 | BGREWRITEAOF / snapshot | rewrite compact AOF on demand | fork/COW (use rewrite in-process) |
-| RESP TCP | slice for redis-cli | Cluster, Sentinel, pub/sub |
+| RESP TCP | yes, on the event loop | Cluster, Sentinel, pub/sub |
+| Event loop | one reactor: poll + execute | Redis 6 I/O threads (read/write only) |
 | Eviction | `maxmemory` + `allkeys-lru` (approx) | LFU, volatile-* |
-| Single writer | mutex or dedicated loop | I/O threads like Redis 6 |
 
 **Non-goals:** Redis Cluster (MOVED/ASK), replication + replica-async,
 Lua, modules, ACL, TLS.
@@ -56,17 +59,64 @@ Hash slots belong in a *later* distributed slice; v0 is one process.
 
 ## Core loop
 
+HTTP tests may use a serializer channel. The **Redis learning path** is
+the RESP reactor (see below), not `go handleConn` + `sync.Mutex`.
+
 ```text
-Client  --RESP or HTTP-->  command goroutine
+                    kqueue / epoll_wait
                               |
-                              |  expire lazy check
-                              |  mutate dict (+ ttl index)
-                              |  append AOF  (maybe fsync)
-                              v
-                            reply
+              +---------------+---------------+
+              | ready fd      | timeout       |
+              v               v
+        read querybuf    time events (active expire)
+        parse RESP
+        processCommand   ← only here the dict moves
+        try write reply  (buffer if EAGAIN, watch writable)
 ```
 
-Periodic ticker: **active expire** samples random keys with TTL.
+Periodic **time event**: active expire samples random keys with TTL
+(same loop, not a second writer).
+
+---
+
+## Event loop — what to actually learn
+
+Redis `ae.c` is not “async magic.” It is:
+
+1. **I/O multiplexing:** the kernel says which fds are readable/writable.
+   10k idle clients cost **file descriptors**, not 10k stacks.
+2. **Non-blocking sockets:** `read`/`write` never park the process; partial
+   buffers live on the client struct (`querybuf` / `buf`).
+3. **Serialized execution:** `processCommand` runs to completion on the
+   loop. Pipelining = many commands from one `querybuf`, still one after
+   another. No dict mutex.
+4. **Time events:** expire, cron, `everysec` AOF, next to file events in
+   the same `aeMain` loop.
+5. **The cost:** a slow command (`KEYS *`) or `appendfsync always` stalls
+   **every** client. That is the whole single-thread tradeoff.
+
+**Go trap:** `net.Listen` + `go func()` per conn is **not** this model.
+The Go runtime already has a netpoller, but **your** dict would need a
+mutex and command order across a connection is easy to get wrong.
+
+**marchicache v0 must implement a real reactor for RESP:**
+
+- One goroutine owns `dict`, TTL index, AOF.
+- That goroutine `epoll_wait`/`kqueue` (or `unix.Kevent` on Darwin) on
+  the listen fd + client fds.
+- Accept / read / execute / write happen there. No `mu.Lock` on the dict.
+- Tests: `-race` with 100 conns × pipelined SET; optional assertion that
+  dict methods are only called from the loop goroutine id.
+
+Acceptable **non-goal:** copying Redis 6 I/O threads. Mentally: those
+threads only copy bytes; execution stays single-threaded.
+
+HTTP can stay “naive” (goroutine + send command to the loop via a
+bounded channel). That still serializes execution but **does not** teach
+multiplexing — hence RESP+reactor is mandatory, not optional polish.
+
+Write `EVENTLOOP.md` in the reactor slice: epoll vs goroutine-per-conn
+table, pipelining, and why `KEYS` is banned in prod.
 
 ---
 
@@ -136,9 +186,15 @@ Rewrite dumps current dict; rename atomically.
 Evict when over `maxmemory` (sample LRU).
 Test: rewrite file smaller; GET after rewrite; eviction of cold keys.
 
-### Slice 5 — RESP
-Enough for `redis-cli -p 6379 SET/GET`.
-Demo in README.
+### Slice 5 — RESP + event loop (the Redis I/O thesis)
+TCP `-redisAddr=:6379`. **One reactor goroutine:** kqueue/epoll, non-blocking
+client fds, RESP parse, execute on the loop, buffered writes.
+No mutex on `dict`. Pipelining must work (`SET a 1\r\nGET a\r\n`).
+`EVENTLOOP.md` + test: 100 connections, `-race` clean, command order per conn.
+`redis-cli` GET/SET/EXPIRE.
+
+This slice is not “also speak RESP.” It is **how one thread takes a lot of
+traffic.** Do not ship RESP as goroutine-per-connection.
 
 ---
 
