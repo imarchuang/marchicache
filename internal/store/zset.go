@@ -22,8 +22,7 @@ func insertZ(e *entry, member string, score float64) int {
 }
 
 func (s *Store) ZAdd(key, member string, score float64) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.check()
 	e, ok := s.lookupLocked(key)
 	if !ok {
 		e = &entry{typ: typeZSet, lastAccess: s.clock.Now()}
@@ -38,8 +37,7 @@ func (s *Store) ZAdd(key, member string, score float64) (int, error) {
 }
 
 func (s *Store) ZRange(key string, start, stop int) ([]ZMember, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.check()
 	e, ok := s.lookupLocked(key)
 	if !ok {
 		return nil, nil

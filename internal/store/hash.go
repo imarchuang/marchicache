@@ -1,8 +1,7 @@
 package store
 
 func (s *Store) HSet(key, field, value string) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.check()
 	e, ok := s.lookupLocked(key)
 	if !ok {
 		e = &entry{typ: typeHash, hash: make(map[string]string), lastAccess: s.clock.Now()}
@@ -21,8 +20,7 @@ func (s *Store) HSet(key, field, value string) (int, error) {
 }
 
 func (s *Store) HGet(key, field string) (string, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.check()
 	e, ok := s.lookupLocked(key)
 	if !ok {
 		return "", false, nil
@@ -35,8 +33,7 @@ func (s *Store) HGet(key, field string) (string, bool, error) {
 }
 
 func (s *Store) HGetAll(key string) (map[string]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.check()
 	e, ok := s.lookupLocked(key)
 	if !ok {
 		return map[string]string{}, nil

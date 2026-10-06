@@ -11,7 +11,7 @@ import (
 )
 
 func TestKVAndHealthz(t *testing.T) {
-	h := New(store.New())
+	h := New(store.New(), Serial())
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
@@ -75,7 +75,7 @@ func TestKVAndHealthz(t *testing.T) {
 }
 
 func TestEXPIREAndTTL(t *testing.T) {
-	h := New(store.New())
+	h := New(store.New(), Serial())
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
@@ -123,7 +123,7 @@ func TestEXPIREAndTTL(t *testing.T) {
 }
 
 func TestHashAndWrongType(t *testing.T) {
-	h := New(store.New())
+	h := New(store.New(), Serial())
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 

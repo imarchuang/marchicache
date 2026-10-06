@@ -72,11 +72,6 @@ func OpenWithClock(dataDir string, policy FsyncPolicy, clock Clock) (*Store, err
 		return nil, err
 	}
 	s.aof = f
-	if policy == FsyncEverysec {
-		s.fsyncStop = make(chan struct{})
-		s.fsyncWG.Add(1)
-		go s.everysecLoop(s.fsyncStop)
-	}
 	return s, nil
 }
 
@@ -183,22 +178,6 @@ func (s *Store) appendLocked(rec aofRec) {
 	}
 }
 
-func (s *Store) everysecLoop(stop <-chan struct{}) {
-	defer s.fsyncWG.Done()
-	t := time.NewTicker(time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-t.C:
-			s.mu.Lock()
-			s.fsyncIfDirtyLocked()
-			s.mu.Unlock()
-		}
-	}
-}
-
 func (s *Store) fsyncIfDirtyLocked() {
 	if s.aof == nil || !s.aofDirty {
 		return
@@ -210,22 +189,9 @@ func (s *Store) fsyncIfDirtyLocked() {
 	s.aofDirty = false
 }
 
-func (s *Store) stopFsyncLocked() {
-	if s.fsyncStop == nil {
-		return
-	}
-	close(s.fsyncStop)
-	s.fsyncStop = nil
-	s.mu.Unlock()
-	s.fsyncWG.Wait()
-	s.mu.Lock()
-}
-
 // Close fsyncs then closes the AOF. Tests simulating kill should not call this.
 func (s *Store) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.stopFsyncLocked()
+	s.check()
 	if s.aof == nil {
 		return nil
 	}
@@ -237,9 +203,7 @@ func (s *Store) Close() error {
 
 // KillClose closes the AOF fd without an extra fsync (crash without clean shutdown).
 func (s *Store) KillClose() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.stopFsyncLocked()
+	s.check()
 	if s.aof == nil {
 		return nil
 	}
@@ -249,8 +213,7 @@ func (s *Store) KillClose() error {
 }
 
 func (s *Store) AOFBytes() int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.check()
 	if s.aof == nil {
 		return 0
 	}
