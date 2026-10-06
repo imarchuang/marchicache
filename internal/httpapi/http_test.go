@@ -121,3 +121,51 @@ func TestEXPIREAndTTL(t *testing.T) {
 		t.Fatalf("missing ttl %q", body)
 	}
 }
+
+func TestHashAndWrongType(t *testing.T) {
+	h := New(store.New())
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	put, err := http.NewRequest(http.MethodPut, srv.URL+"/hash/u/name", strings.NewReader("marc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("hset %d", resp.StatusCode)
+	}
+
+	resp, err = http.Get(srv.URL + "/hash/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "marc") {
+		t.Fatalf("hgetall %d %s", resp.StatusCode, body)
+	}
+
+	put, err = http.NewRequest(http.MethodPut, srv.URL+"/kv/a", strings.NewReader("1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err = http.DefaultClient.Do(put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(srv.URL + "/hash/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("wrongtype %d", resp.StatusCode)
+	}
+}

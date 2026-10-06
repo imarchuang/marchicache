@@ -13,18 +13,18 @@ func (f *fakeClock) Now() time.Time { return f.now }
 
 func TestSetGetDel(t *testing.T) {
 	s := New()
-	if _, ok := s.Get("a"); ok {
+	if _, ok, _ := s.Get("a"); ok {
 		t.Fatal("expected miss")
 	}
 	s.Set("a", "1")
-	v, ok := s.Get("a")
-	if !ok || v != "1" {
-		t.Fatalf("got %q ok=%v", v, ok)
+	v, ok, err := s.Get("a")
+	if err != nil || !ok || v != "1" {
+		t.Fatalf("got %q ok=%v err=%v", v, ok, err)
 	}
 	if !s.Del("a") {
 		t.Fatal("expected del")
 	}
-	if _, ok := s.Get("a"); ok {
+	if _, ok, _ := s.Get("a"); ok {
 		t.Fatal("expected miss after del")
 	}
 	if s.Del("a") {
@@ -43,11 +43,11 @@ func TestLazyExpireWithFakeClock(t *testing.T) {
 		t.Fatalf("ttl=%d", s.TTL("k"))
 	}
 	clk.now = clk.now.Add(9 * time.Second)
-	if v, ok := s.Get("k"); !ok || v != "v" {
-		t.Fatalf("still live: %q %v", v, ok)
+	if v, ok, err := s.Get("k"); err != nil || !ok || v != "v" {
+		t.Fatalf("still live: %q %v %v", v, ok, err)
 	}
 	clk.now = clk.now.Add(2 * time.Second)
-	if _, ok := s.Get("k"); ok {
+	if _, ok, _ := s.Get("k"); ok {
 		t.Fatal("lazy expire should miss after T")
 	}
 	if s.TTL("k") != TTLMissing {
@@ -87,10 +87,10 @@ func TestActiveExpire(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("expired %d", n)
 	}
-	if _, ok := s.Get("cold"); ok {
+	if _, ok, _ := s.Get("cold"); ok {
 		t.Fatal("cold should be gone")
 	}
-	if _, ok := s.Get("hot"); !ok {
+	if _, ok, _ := s.Get("hot"); !ok {
 		t.Fatal("hot should remain")
 	}
 }

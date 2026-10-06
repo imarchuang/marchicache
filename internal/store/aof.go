@@ -20,10 +20,13 @@ const (
 const aofName = "appendonly.aof"
 
 type aofRec struct {
-	Op       string `json:"op"`
-	Key      string `json:"key"`
-	Value    string `json:"value,omitempty"`
-	ExpireAt int64  `json:"expireAt"`
+	Op       string  `json:"op"`
+	Key      string  `json:"key"`
+	Value    string  `json:"value,omitempty"`
+	Field    string  `json:"field,omitempty"`
+	Member   string  `json:"member,omitempty"`
+	Score    float64 `json:"score,omitempty"`
+	ExpireAt int64   `json:"expireAt"`
 }
 
 func ParseFsync(s string) (FsyncPolicy, error) {
@@ -105,7 +108,7 @@ func (s *Store) replay(path string) error {
 func (s *Store) applyRec(rec aofRec) {
 	switch rec.Op {
 	case "SET":
-		e := &entry{value: rec.Value}
+		e := &entry{typ: typeString, value: rec.Value}
 		if rec.ExpireAt > 0 {
 			e.expireAt = time.Unix(0, rec.ExpireAt)
 			if s.isExpiredLocked(e) {
@@ -128,6 +131,25 @@ func (s *Store) applyRec(rec aofRec) {
 		if s.isExpiredLocked(e) {
 			delete(s.dict, rec.Key)
 		}
+	case "HSET":
+		e, ok := s.dict[rec.Key]
+		if !ok {
+			e = &entry{typ: typeHash, hash: make(map[string]string)}
+			s.dict[rec.Key] = e
+		}
+		if e.hash == nil {
+			e.hash = make(map[string]string)
+		}
+		e.typ = typeHash
+		e.hash[rec.Field] = rec.Value
+	case "ZADD":
+		e, ok := s.dict[rec.Key]
+		if !ok {
+			e = &entry{typ: typeZSet}
+			s.dict[rec.Key] = e
+		}
+		e.typ = typeZSet
+		insertZ(e, rec.Member, rec.Score)
 	}
 }
 
