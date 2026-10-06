@@ -20,6 +20,8 @@ curl -X DELETE localhost:6380/kv/session
 
 TTL uses lazy expire on GET plus an active expire ticker (samples keys). Redis semantics: TTL `-2` missing, `-1` no expire.
 
+HASH: `PUT /hash/{key}/{field}`, `GET /hash/{key}` (HGETALL), `GET /hash/{key}/{field}`. ZSET: `PUT /zset/{key}/{member}?score=`, `GET /zset/{key}`. SET then HGET returns WRONGTYPE.
+
 Flags: `-addr=:6380`, `-dataDir=./data`, `-appendfsync=everysec|always|no`.
 
 AOF is JSONL in `{dataDir}/appendonly.aof`. `always` fsyncs each mutate so a kill without flush still replays. `everysec` batches fsync on a ticker.

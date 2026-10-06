@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"os"
 	"sync"
 	"time"
@@ -11,6 +12,8 @@ const (
 	TTLNoExpire int64 = -1
 )
 
+var ErrWrongType = errors.New("WRONGTYPE Operation against a key holding the wrong kind of value")
+
 // Clock lets tests inject a fake now.
 type Clock interface {
 	Now() time.Time
@@ -20,9 +23,25 @@ type realClock struct{}
 
 func (realClock) Now() time.Time { return time.Now() }
 
+type valueType int
+
+const (
+	typeString valueType = iota
+	typeHash
+	typeZSet
+)
+
+type ZMember struct {
+	Member string
+	Score  float64
+}
+
 type entry struct {
+	typ      valueType
 	value    string
-	expireAt time.Time // zero = no expire
+	hash     map[string]string
+	zset     []ZMember
+	expireAt time.Time
 }
 
 // Store is an in-memory string dict with per-key TTL and optional AOF.
@@ -54,7 +73,7 @@ func (s *Store) Set(key, value string) {
 func (s *Store) SetEX(key, value string, ttl time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e := &entry{value: value}
+	e := &entry{typ: typeString, value: value}
 	if ttl > 0 {
 		e.expireAt = s.clock.Now().Add(ttl)
 	}
@@ -62,19 +81,30 @@ func (s *Store) SetEX(key, value string, ttl time.Duration) {
 	s.appendLocked(aofRec{Op: "SET", Key: key, Value: value, ExpireAt: expireUnix(e.expireAt)})
 }
 
-func (s *Store) Get(key string) (string, bool) {
+func (s *Store) Get(key string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	e, ok := s.lookupLocked(key)
+	if !ok {
+		return "", false, nil
+	}
+	if e.typ != typeString {
+		return "", false, ErrWrongType
+	}
+	return e.value, true, nil
+}
+
+func (s *Store) lookupLocked(key string) (*entry, bool) {
 	e, ok := s.dict[key]
 	if !ok {
-		return "", false
+		return nil, false
 	}
 	if s.isExpiredLocked(e) {
 		delete(s.dict, key)
 		s.appendLocked(aofRec{Op: "DEL", Key: key})
-		return "", false
+		return nil, false
 	}
-	return e.value, true
+	return e, true
 }
 
 func (s *Store) Del(key string) bool {
