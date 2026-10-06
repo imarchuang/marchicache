@@ -1,42 +1,189 @@
 package store
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
-// Store is an in-memory string dict. Slice 0 has no TTL or AOF.
+const (
+	TTLMissing  int64 = -2
+	TTLNoExpire int64 = -1
+)
+
+// Clock lets tests inject a fake now.
+type Clock interface {
+	Now() time.Time
+}
+
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }
+
+type entry struct {
+	value    string
+	expireAt time.Time // zero = no expire
+}
+
+// Store is an in-memory string dict with per-key TTL.
 type Store struct {
-	mu   sync.RWMutex
-	dict map[string]string
+	mu    sync.RWMutex
+	dict  map[string]*entry
+	clock Clock
 }
 
 func New() *Store {
-	return &Store{dict: make(map[string]string)}
+	return NewWithClock(realClock{})
+}
+
+func NewWithClock(c Clock) *Store {
+	return &Store{dict: make(map[string]*entry), clock: c}
 }
 
 func (s *Store) Set(key, value string) {
+	s.SetEX(key, value, 0)
+}
+
+func (s *Store) SetEX(key, value string, ttl time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.dict[key] = value
+	e := &entry{value: value}
+	if ttl > 0 {
+		e.expireAt = s.clock.Now().Add(ttl)
+	}
+	s.dict[key] = e
 }
 
 func (s *Store) Get(key string) (string, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	v, ok := s.dict[key]
-	return v, ok
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.dict[key]
+	if !ok {
+		return "", false
+	}
+	if s.isExpiredLocked(e) {
+		delete(s.dict, key)
+		return "", false
+	}
+	return e.value, true
 }
 
 func (s *Store) Del(key string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.dict[key]; !ok {
+	e, ok := s.dict[key]
+	if !ok {
+		return false
+	}
+	if s.isExpiredLocked(e) {
+		delete(s.dict, key)
 		return false
 	}
 	delete(s.dict, key)
 	return true
 }
 
+// Expire sets a TTL. Returns false if the key is missing (Redis EXPIRE).
+func (s *Store) Expire(key string, ttl time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.dict[key]
+	if !ok {
+		return false
+	}
+	if s.isExpiredLocked(e) {
+		delete(s.dict, key)
+		return false
+	}
+	if ttl <= 0 {
+		delete(s.dict, key)
+		return true
+	}
+	e.expireAt = s.clock.Now().Add(ttl)
+	return true
+}
+
+// TTL returns remaining seconds, -1 if no expire, -2 if missing (Redis TTL).
+func (s *Store) TTL(key string) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.dict[key]
+	if !ok {
+		return TTLMissing
+	}
+	if s.isExpiredLocked(e) {
+		delete(s.dict, key)
+		return TTLMissing
+	}
+	if e.expireAt.IsZero() {
+		return TTLNoExpire
+	}
+	sec := int64(e.expireAt.Sub(s.clock.Now()).Seconds())
+	if sec < 0 {
+		delete(s.dict, key)
+		return TTLMissing
+	}
+	return sec
+}
+
 func (s *Store) Len() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lazySweepLocked()
 	return len(s.dict)
+}
+
+func (s *Store) isExpiredLocked(e *entry) bool {
+	if e.expireAt.IsZero() {
+		return false
+	}
+	return !s.clock.Now().Before(e.expireAt)
+}
+
+func (s *Store) lazySweepLocked() {
+	for k, e := range s.dict {
+		if s.isExpiredLocked(e) {
+			delete(s.dict, k)
+		}
+	}
+}
+
+// ActiveExpire samples up to limit keys (Go map iteration is randomized)
+// and deletes expired ones. Redis-style active expire on a time event.
+func (s *Store) ActiveExpire(limit int) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 {
+		limit = 20
+	}
+	n := 0
+	i := 0
+	for k, e := range s.dict {
+		if i >= limit {
+			break
+		}
+		i++
+		if s.isExpiredLocked(e) {
+			delete(s.dict, k)
+			n++
+		}
+	}
+	return n
+}
+
+func (s *Store) StartActiveExpire(stop <-chan struct{}, interval time.Duration) {
+	if interval <= 0 {
+		interval = 100 * time.Millisecond
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				s.ActiveExpire(20)
+			}
+		}
+	}()
 }
