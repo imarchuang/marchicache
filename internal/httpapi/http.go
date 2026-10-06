@@ -29,6 +29,7 @@ func New(st *store.Store) http.Handler {
 	mux.HandleFunc("GET /hash/{key}", s.getHash)
 	mux.HandleFunc("PUT /zset/{key}/{member}", s.putZSet)
 	mux.HandleFunc("GET /zset/{key}", s.getZSet)
+	mux.HandleFunc("POST /rewrite", s.rewrite)
 	return mux
 }
 
@@ -191,4 +192,12 @@ func (s *Server) getZSet(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+func (s *Server) rewrite(w http.ResponseWriter, _ *http.Request) {
+	if err := s.st.Rewrite(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

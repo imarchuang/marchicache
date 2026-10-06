@@ -5,7 +5,7 @@ func (s *Store) HSet(key, field, value string) (int, error) {
 	defer s.mu.Unlock()
 	e, ok := s.lookupLocked(key)
 	if !ok {
-		e = &entry{typ: typeHash, hash: make(map[string]string)}
+		e = &entry{typ: typeHash, hash: make(map[string]string), lastAccess: s.clock.Now()}
 		s.dict[key] = e
 	} else if e.typ != typeHash {
 		return 0, ErrWrongType
@@ -13,6 +13,7 @@ func (s *Store) HSet(key, field, value string) (int, error) {
 	_, exists := e.hash[field]
 	e.hash[field] = value
 	s.appendLocked(aofRec{Op: "HSET", Key: key, Field: field, Value: value})
+	s.evictLRULocked()
 	if exists {
 		return 0, nil
 	}

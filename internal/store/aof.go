@@ -142,6 +142,9 @@ func (s *Store) applyRec(rec aofRec) {
 		}
 		e.typ = typeHash
 		e.hash[rec.Field] = rec.Value
+		if rec.ExpireAt > 0 {
+			e.expireAt = time.Unix(0, rec.ExpireAt)
+		}
 	case "ZADD":
 		e, ok := s.dict[rec.Key]
 		if !ok {
@@ -150,6 +153,9 @@ func (s *Store) applyRec(rec aofRec) {
 		}
 		e.typ = typeZSet
 		insertZ(e, rec.Member, rec.Score)
+		if rec.ExpireAt > 0 {
+			e.expireAt = time.Unix(0, rec.ExpireAt)
+		}
 	}
 }
 

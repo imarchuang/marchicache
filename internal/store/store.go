@@ -37,11 +37,12 @@ type ZMember struct {
 }
 
 type entry struct {
-	typ      valueType
-	value    string
-	hash     map[string]string
-	zset     []ZMember
-	expireAt time.Time
+	typ        valueType
+	value      string
+	hash       map[string]string
+	zset       []ZMember
+	expireAt   time.Time
+	lastAccess time.Time
 }
 
 // Store is an in-memory string dict with per-key TTL and optional AOF.
@@ -56,6 +57,7 @@ type Store struct {
 	aofErr    error
 	fsyncStop chan struct{}
 	fsyncWG   sync.WaitGroup
+	maxMemory int64
 }
 
 func New() *Store {
@@ -73,12 +75,13 @@ func (s *Store) Set(key, value string) {
 func (s *Store) SetEX(key, value string, ttl time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e := &entry{typ: typeString, value: value}
+	e := &entry{typ: typeString, value: value, lastAccess: s.clock.Now()}
 	if ttl > 0 {
 		e.expireAt = s.clock.Now().Add(ttl)
 	}
 	s.dict[key] = e
 	s.appendLocked(aofRec{Op: "SET", Key: key, Value: value, ExpireAt: expireUnix(e.expireAt)})
+	s.evictLRULocked()
 }
 
 func (s *Store) Get(key string) (string, bool, error) {
@@ -104,6 +107,7 @@ func (s *Store) lookupLocked(key string) (*entry, bool) {
 		s.appendLocked(aofRec{Op: "DEL", Key: key})
 		return nil, false
 	}
+	e.lastAccess = s.clock.Now()
 	return e, true
 }
 
