@@ -17,6 +17,7 @@ func main() {
 	addr := flag.String("addr", ":6380", "HTTP listen address")
 	dataDir := flag.String("dataDir", "./data", "data directory for AOF")
 	appendfsync := flag.String("appendfsync", "everysec", "AOF fsync: always|everysec|no")
+	maxmemory := flag.Int64("maxmemory", 0, "max memory in bytes; 0 disables eviction")
 	flag.Parse()
 
 	policy, err := store.ParseFsync(*appendfsync)
@@ -27,6 +28,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	st.SetMaxMemory(*maxmemory)
 
 	stop := make(chan struct{})
 	st.StartActiveExpire(stop, 100*time.Millisecond)

@@ -26,13 +26,14 @@ func (s *Store) ZAdd(key, member string, score float64) (int, error) {
 	defer s.mu.Unlock()
 	e, ok := s.lookupLocked(key)
 	if !ok {
-		e = &entry{typ: typeZSet}
+		e = &entry{typ: typeZSet, lastAccess: s.clock.Now()}
 		s.dict[key] = e
 	} else if e.typ != typeZSet {
 		return 0, ErrWrongType
 	}
 	added := insertZ(e, member, score)
 	s.appendLocked(aofRec{Op: "ZADD", Key: key, Member: member, Score: score})
+	s.evictLRULocked()
 	return added, nil
 }
 
